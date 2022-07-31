@@ -1,0 +1,487 @@
+---
+title: "Joined Data Prep and Exploration"
+author: "Lucas de Paula"
+date: '2022-07-24'
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl) 
+library(stringr)
+library(dplyr)
+library(splitstackshape)
+library(tidytext) 
+library(topicmodels)
+library(data.table)
+library(fastDummies)
+library(tidyverse)
+library(tidymodels)
+library(glmnet) 
+
+dt <- read.csv("data/zomato.csv", encoding = "UTF-8")
+                
+```
+
+```{r}
+
+keep_cols <- c("address","name","online_order","book_table","rate","votes","phone","location","rest_type","dish_liked","cuisines","approx_cost.for.two.people.","reviews_list","menu_item","listed_in.type.","listed_in.city.")
+
+dt <- dt[keep_cols]
+
+df = dt %>% 
+  rename( ratings = rate,
+          food_list_type = listed_in.type., 
+          city = listed_in.city., 
+          reservations = book_table, 
+          two_meal_cost = approx_cost.for.two.people., 
+          restaurant_type = rest_type )
+
+```
+
+```{r}
+
+# Data cleaning
+
+df$two_meal_cost <- gsub(",", "", df$two_meal_cost)
+
+df <- df %>% 
+  mutate( online_order = as.numeric(recode(online_order, "Yes" = "1", "No" = "0")),
+          reservations = as.numeric(recode(reservations, "Yes" = "1", "No" = "0")),
+          two_meal_cost = as.numeric(two_meal_cost))
+
+# Remove /5 from the rating 
+# Transform into number
+# 999 represents new restaurants
+# NA represents missing data
+
+df <- df %>%
+  mutate(across('ratings', str_replace, '/5', '')) %>%
+  mutate(across('ratings', str_replace, 'NEW', '999')) %>%
+  mutate(ratings = parse_number(ratings))
+
+# drop data with rate_1 set to NA 
+df = df %>% filter(!is.na(ratings)) 
+
+# set the phone count column 
+df = df %>% 
+  mutate( phone_count = case_when( gsub("\\s", "", gsub("\\+91", "", gsub("080", "80", df$phone))) > 10 ~ 2, 
+                                   (gsub("\\s", "", gsub("\\+91", "", gsub("080", "80", df$phone))) <= 10 & gsub("\\s", "", gsub("\\+91", "", gsub("080", "80", df$phone))) > 0) ~ 1, TRUE ~ 0 ))
+
+df_export <- df %>% select(c("name", "ratings"))
+write.csv(df_export, "/Users/ludepa/Desktop/Personal/UNCW/Spring22/BAN530/EDA/uncw_ban530/df.csv")
+
+```
+
+```{r}
+
+df = df %>% mutate( favorite_count = str_count(df$dish_liked, ',') + 1, 
+                    favorite_count = replace_na(favorite_count, 0), 
+                    menu_listed = case_when( menu_item == '[]' ~ 0, is.na(menu_item) ~ 0, TRUE ~ 1 ), 
+                    food_list_type = case_when( (food_list_type == 'Dine-out' | food_list_type == 'Delivery') ~ 'Takeaway', 
+                                                (food_list_type == 'Cafes' | food_list_type == 'Desserts') ~ 'Sheet Shop', 
+                                                (food_list_type == 'Drinks & nightlife' | food_list_type == 'Pubs and bars') ~ 'Bars', TRUE ~ 'Unkown' ), 
+                    food_list_type = as_factor(food_list_type) )
+```
+
+```{r}
+# remove unnecessary data 
+df = df %>% select(-c('menu_item', 'phone', 'dish_liked', 'location')) 
+
+# get the second to last word in the addresss column # NOTE that some rows do not have a city name 
+temp = trimws(gsub(".*?([^,]+),[^,]+$", "\\1", df$address)) 
+
+# substitue missing data from the food_city_loc with the temp column 
+df = within(df, city[is.na(city)] <- temp[is.na(df$city)])
+```
+
+```{r}
+
+df_splitted <- df %>% 
+    mutate(restaurant_type = strsplit(as.character(restaurant_type), ",")) %>% 
+    unnest(restaurant_type) %>%
+    mutate(restaurant_type = trimws(restaurant_type))
+
+df = df_splitted %>% 
+  mutate( restaurant_type_unique = case_when( 
+    (restaurant_type == 'Lounge' | restaurant_type == 'Microbrewery' | restaurant_type == 'Pub') ~ 'Bar', 
+    (restaurant_type == 'Cafe'| restaurant_type == 'Irani Cafee'| restaurant_type == 'Beverage Shop') ~ 'Cafe / Tea',
+    (restaurant_type == 'Sweet Shop' | restaurant_type == 'Bakery' | restaurant_type == 'Confectionery' | restaurant_type == 'Casual Dining') ~ 'Dessert Parlor',
+    (restaurant_type == 'Delivery' | restaurant_type == 'Takeaway') ~ 'Delivery',
+    (restaurant_type == 'Mess' | restaurant_type == 'Food Truck' | restaurant_type == 'Pop Up'| restaurant_type == 'Bhojanalya'| restaurant_type == 'Meat Shop'| restaurant_type == 'Kiosk'| restaurant_type == 'Dhaba') ~ 'Quick Bites', 
+    (restaurant_type == 'Club' | restaurant_type == 'Casual Dining' | restaurant_type == 'Food Court') ~ 'Fine Dining', TRUE ~ restaurant_type) ) 
+
+df = df %>% 
+  select(-restaurant_type) %>%
+  rename( restaurant_type = restaurant_type_unique)
+
+```
+
+```{r}
+
+# Treating listed_in.type (restaurant_type) for texting purposes
+# Restaurants like Hangover have 2 locations and each location has multiple types
+# We will get only the first occurency by restaurant name and city.
+# we are ignoring the restaurant_type as this doesn't create distinct reviews
+
+unique_rest_reviews <- df %>% 
+  group_by(name, reviews_list) %>% 
+  slice(1) %>%
+  ungroup()
+
+
+```
+
+```{r}
+
+# Formatting data for unique restaurants only
+
+unique_formatted <- unique_rest_reviews %>%
+  filter(reviews_list != "[]") # remove empty reviews
+
+unique_formatted$reviews <- gsub("('Rated [1-5][.][0-5]', 'RATED\\\\n. )", " ", unique_formatted$reviews_list)
+unique_formatted$reviews <- gsub("('Rated [1-5][.][0-5]', \"RATED\\\\n. )", " ", unique_formatted$reviews)
+unique_formatted$reviews <- gsub("('Rated [1-5][.][0-5]', \\\"RATED\\\\n)", " ", unique_formatted$reviews)
+
+unique_formatted$reviews <- gsub("[\r\n]", " ", unique_formatted$reviews)
+
+unique_formatted <- unique_formatted %>%
+  mutate(across('reviews', str_replace_all, '[^[:alnum:]]', " "))
+
+
+unique_formatted <- unique_formatted %>%
+  mutate(across('reviews', str_replace_all, '[[:punct:]]', " "))
+
+unique_formatted <- unique_formatted %>%
+  mutate(across('reviews', str_replace_all, '[[:digit:]]', " "))
+
+unique_formatted$reviews <- iconv(unique_formatted$reviews, from = 'UTF-8', to = 'ASCII//TRANSLIT')
+
+```
+
+```{r}
+
+# Text pre-processing
+
+# First we will only select the text data for unique name / location
+
+text_uniques <- unique_formatted %>%
+  select("name", "city", "reviews")
+
+
+tidy_reviews<- text_uniques %>%
+  unnest_tokens("word", reviews)
+
+tidy_reviews %>%
+    count(word) %>%
+    arrange(desc(n))
+
+data("stop_words")
+ 
+tidy_reviews <- tidy_reviews %>%
+  anti_join(stop_words)
+
+# Remove specific words from our analysis
+
+specific_stopwords <- c("food", "nthe", "restaurant", "dishes", "nfood")
+
+new_df <- tidy_reviews %>%
+  filter(!word %in% specific_stopwords)
+
+my_colors <- c("#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#D55E00")
+
+word_counts <- new_df %>%
+  count(city, word, sort = TRUE) %>%
+  mutate(word = reorder(word, n))
+
+word_counts %>%
+  arrange(desc(n)) %>%
+  group_by(city, word)
+
+# Get top 5 words by city
+
+word_c <- data.table(word_counts, key = "city")
+top_5_words_bycity <- word_c[ , head(.SD, 5), by = city]
+
+# top_5_words_bycity %>%
+#   mutate(word = reorder(word, n)) %>%
+#   ggplot(aes(n, word)) +
+#   geom_col(aes(word, n), fill = my_colors[4]) +
+#   labs(y = NULL) +
+#   facet_wrap(~city, scales = "free") +
+#   ylab("Common words by Location") +
+#   ggtitle("Most Frequently Used Words in Reviewer's comments by City") +
+#   coord_flip()
+
+for (var in unique(top_5_words_bycity$city)) {
+    
+    plot <- ggplot(top_5_words_bycity[top_5_words_bycity$city==var,], aes(word, n)) + 
+              geom_col() + 
+              labs(x=NULL, y="N", title=paste("Most common review words for location: ", var))
+    
+    print(plot)
+}
+
+```
+
+```{r}
+# Filter by word importance (TF-IDF) on each document
+
+## The words are completely different when comparing both approaches. On the word count approach, chicken, time, service are always the top words.
+## However, when we use TF/IDF, the words are more diverse across locations 
+## This is due to the fact that TF/IDF will help us identify words unique to a document, not simply the most common ones, by  measuring and ranking the most common words in each document. In summary, The goal is to find words that appear more frequently in a specific document but are not used very much in a collection of documents.
+
+reviews_tf_idf <- new_df %>%
+    count(city, word, sort = TRUE) %>%
+    bind_tf_idf(word, city, n) %>%
+    arrange(-tf_idf) %>%
+    group_by(city) %>%
+    top_n(5) %>%
+    ungroup
+
+reviews_tf_idf %>%
+    mutate(word = reorder_within(word, tf_idf, city)) %>%
+    ggplot(aes(word, tf_idf, fill = city)) +
+    geom_col(alpha = 0.5, show.legend = FALSE) +
+    facet_wrap(~ city, scales = "free") +
+    coord_flip() +
+    theme(strip.text=element_text(size=7)) +
+    labs(x = NULL, y = "tf-idf",
+         title = "Highest tf-idf words in reviews by city / location") +
+  scale_x_reordered() 
+
+for (var in unique(reviews_tf_idf$city)) {
+  
+    plot2 <- ggplot(reviews_tf_idf[reviews_tf_idf$city==var,], aes(word, tf_idf)) + 
+      geom_col() + 
+      labs(x=NULL, y="tf-idf", title=paste("Highest TF-IDF words at ", var))  
+  
+    print(plot2)
+}
+
+```
+
+```{r}
+
+rest_dtm <- new_df %>%
+  count(city, word) %>%
+  cast_dtm(city, word, n)
+
+# Create model to discover 4 topics
+AP_topic_model<-LDA(rest_dtm, k=4, control = list(seed = 321))
+
+AP_topics <- tidy(AP_topic_model, matrix = "beta")
+
+# Filter top 10 words by topic 
+AP_top_terms <-   AP_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Plot 10 words by topics by beta
+
+AP_top_terms %>%
+  mutate(term = reorder_within(term, beta,topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() + 
+  scale_x_reordered()
+
+```
+
+```{r}
+
+food_type_ratings <- df %>%
+  select("food_list_type", "ratings") %>%
+  mutate(food_list_type = as.factor(food_list_type)) %>%
+  mutate(ratings = as.numeric(ratings)) %>%
+  filter(ratings < 6)
+  
+
+p <- ggplot(food_type_ratings, aes(food_list_type, ratings)) + 
+  geom_boxplot(aes(group = cut_width(food_list_type, 0.25)))
+p
+
+```
+
+```{r}
+# city_vote <- df %>%
+#   select("city", "votes") %>%
+#   mutate(city = as.factor(city)) %>%
+#   mutate(votes = as.numeric(votes))
+#   
+# 
+# p3 <- ggplot(city_vote, aes(city, votes)) + 
+#   geom_boxplot(aes(group = cut_width(city, 0.25)), outlier.shape = NA)
+# p3
+```
+
+```{r}
+food_type_vote <- df %>%
+  select("food_list_type", "votes") %>%
+  mutate(food_list_type = as.factor(food_list_type)) %>%
+  mutate(votes = as.numeric(votes)) %>%
+  filter(votes < 7500)
+  
+
+p4 <- ggplot(food_type_vote, aes(food_list_type, votes)) + 
+  geom_boxplot()
+p4
+```
+
+```{r}
+restaurant_type_vote <- df %>%
+  select("restaurant_type", "votes") %>%
+  mutate(restaurant_type = as.factor(restaurant_type)) %>%
+  mutate(votes = as.numeric(votes)) %>%
+  filter(votes < 7500)
+  
+
+p5 <- ggplot(restaurant_type_vote, aes(restaurant_type, votes)) + 
+  geom_boxplot()
+p5
+
+```
+
+```{r}
+restaurant_type_rating <- df %>%
+  select("restaurant_type", "ratings") %>%
+  mutate(restaurant_type = as.factor(restaurant_type)) %>%
+  mutate(ratings = as.numeric(ratings)) %>%
+  filter(ratings < 6)
+  
+
+p6 <- ggplot(restaurant_type_rating, aes(restaurant_type, ratings)) + 
+  geom_boxplot()
+p6
+
+```
+
+```{r}
+
+# Prepare modelling dataset
+# Grouping cuisine by region
+
+north_indian = c('North Indian', 'Awadhi', 'Lucknowi','Rajasthani','Assamese','North Eastern','Parsi','Sindhi')
+eastern_indian = c('Bengali', 'Bihari', 'Burmese', 'Mughlai','Odisha')
+western_indian = c('Goan', 'Gujarati', 'Kashmiri', 'Konkan', 'Maharashtrian')
+south_indian = c('South Indian', 'Andhra', 'Biryani', 'Bohri','Chettinad', 'Kerala', 'Mangalorean','Sri Lankan','Tamil')
+asian = c('Chinese', 'Thai', 'Asian', 'Korean', 'Indonesian', 'Japanese', 'Vietnamese', 'Tibetan', 'Nepalese','Sushi','Cantonese','Australian','Malaysian','Singaporean','Russian', 'Pan Asian', 'Mongolian', 'Paan')
+middle_east = c('Iranian', 'Greek', 'Afghani','Lebanese','Jewish','Middle Eastern','Kebab','Mideterranean','Arabian', 'Turkish', 'Afghani')
+european = c('Italian', 'French', 'European', 'German','Portuguese', 'Belgian', 'British','Continental','Spanish') 
+western = c('Mexican', 'Tex', 'BBQ', 'Burger', 'Charcoal Chicken','Fast Food','Pizza','Sandwich','South American','Steak')
+drinks = c('Bubble Tea', 'Coffee', 'Juices','Tea','Beverages','Drinks Only')
+vegetarian = c('Salad', 'Seafood','Vegan')
+other = c('Bar Food', 'Bakery','Desserts','Finger Food','Grill', 'Mithai', 'Modern Indian', 'Momos', 'Naga','Raw Meats', 'Rolls','African')
+
+keep_cols <- c("name", "online_order", "reservations","ratings","votes","two_meal_cost","city","phone_count","favorite_count","menu_listed","restaurant_type","food_list_type","cuisine")
+
+df_splitted_cuisines <- df %>% 
+    mutate(cuisine = strsplit(as.character(cuisines), ",")) %>% 
+    unnest(cuisine) %>%
+    mutate(cuisine = trimws(cuisine))
+
+df_splitted_cuisines <- df_splitted_cuisines %>% 
+  select(keep_cols)
+
+modelling_df = df_splitted_cuisines %>% 
+  mutate( grouped_cuisine = case_when( 
+    (cuisine %in% north_indian) ~ 'North Indian', 
+    (cuisine %in% eastern_indian) ~ 'Eastern Indian', 
+    (cuisine %in% western_indian) ~ 'Western Indian', 
+    (cuisine %in% south_indian) ~ 'Souhtern Indian', 
+    (cuisine %in% asian) ~ 'Asian', 
+    (cuisine %in% middle_east) ~ 'Middle East', 
+    (cuisine %in% european) ~ 'European', 
+    (cuisine %in% western) ~ 'Western', 
+    (cuisine %in% drinks) ~ 'Drinks', 
+    (cuisine %in% vegetarian) ~ 'Vegetarian', 
+      TRUE ~ 'Other'))
+
+# Create binary versions of the columns Cuisine, Restaurant_Type
+
+dummies_df <- dummy_cols(modelling_df,select_columns = c('grouped_cuisine','restaurant_type','food_list_type'))
+
+filtered_dummies <- dummies_df %>%
+  select(-grouped_cuisine) %>%
+  select (-restaurant_type) %>%
+  select(-cuisine) %>%
+  select(-food_list_type)
+
+names(filtered_dummies)
+
+```
+
+```{r}
+
+dummies_df_summ <- filtered_dummies %>%
+  group_by(name, online_order, reservations,ratings,votes,two_meal_cost,city,phone_count,favorite_count,menu_listed) %>%
+  summarise(grouped_cuisine_Asian = max(grouped_cuisine_Asian),
+            grouped_cuisine_Drinks = max(grouped_cuisine_Drinks),
+            grouped_cuisine_European = max(grouped_cuisine_European),
+            grouped_cuisine_Western = max(grouped_cuisine_Western),
+            grouped_cuisine_Vegetarian = max(grouped_cuisine_Vegetarian),
+            grouped_cuisine_Other = max(grouped_cuisine_Other),
+            grouped_cuisine_Eastern_Indian = max(`grouped_cuisine_Eastern Indian`),
+            grouped_cuisine_Eastern_Indian = max(`grouped_cuisine_Eastern Indian`),
+            grouped_cuisine_Middle_East = max(`grouped_cuisine_Middle East`),
+            grouped_cuisine_North_Indian = max(`grouped_cuisine_North Indian`),
+            grouped_cuisine_Souhtern_Indian = max(`grouped_cuisine_Souhtern Indian`),
+            grouped_cuisine_Western_Indian = max(`grouped_cuisine_Western Indian`),
+            restaurant_type_Cafe_Tea = max(`restaurant_type_Cafe / Tea`),
+            restaurant_type_Dessert_Parlor = max(`restaurant_type_Dessert Parlor`),
+            restaurant_type_Fine_Dining = max(`restaurant_type_Fine Dining`),
+            restaurant_type_Quick_Bites = max(`restaurant_type_Quick Bites`),
+            restaurant_type_Bar = max(restaurant_type_Bar),
+            restaurant_type_Delivery = max(restaurant_type_Delivery),
+            food_list_type_Unkown = max(food_list_type_Unkown),
+            food_list_type_Sheet_Shop = max(`food_list_type_Sheet Shop`),
+            food_list_type_Takeaway = max(food_list_type_Takeaway),
+            food_list_type_Bars = max(food_list_type_Bars))
+
+head(dummies_df_summ)
+
+```
+```{r}
+
+# Data Splitting and sampling
+
+set.seed(123)
+
+split_dt <- subset (dummies_df_summ, select = -name)
+
+# Remove 999 from dataset
+split_dt <- split_dt %>% filter(ratings <=5)
+
+
+# Create split object
+rating_split <- initial_split(split_dt, prop = 0.70, 
+                                   strata = ratings)
+
+# Split training data set
+rating_training <- rating_split %>% 
+                        training()
+
+# Split testing data set
+rating_test <- rating_split %>% 
+                    testing()
+
+
+# Define k-fold cross validation parameters
+
+folds = vfold_cv(split_dt, v = 5)
+
+# write.csv(rating_training, file="/Users/ludepa/Desktop/Personal/UNCW/Spring22/BAN530/EDA/data/rating_training.csv")
+# write.csv(rating_test, file="/Users/ludepa/Desktop/Personal/UNCW/Spring22/BAN530/EDA/data/rating_test.csv")
+# write.csv(modelling_df, file="/Users/ludepa/Desktop/Personal/UNCW/Spring22/BAN530/EDA/data/modelling_df.csv")
+# write.csv(df, file="/Users/ludepa/Desktop/Personal/UNCW/Spring22/BAN530/EDA/data/df.csv")
+
+
+```
+
