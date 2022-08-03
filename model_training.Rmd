@@ -80,14 +80,18 @@ rating_test_results <- predict(lm_fit, new_data = new_testing) %>%
 rating_test_results
 
 # RMSE on test set
-rmse(rating_test_results, 
+rmse_exp1 <- rmse(rating_test_results, 
      truth = ratings,
      estimate = .pred)
 
 # R2 on test set
-rsq(rating_test_results,
+rsquare_exp1 <- rsq(rating_test_results,
     truth = ratings,
     estimate = .pred)
+
+experiments <- data.frame(experiment = "experiment 1", rmse = rmse_exp1[".estimate"], rsquare = rsquare_exp1[".estimate"])
+experiments <- experiments %>% rename(rmse = ".estimate", rsquare = ".estimate.1" )
+
 
 ggplot(data = rating_test_results,
        mapping = aes(x = .pred, y = ratings)) +
@@ -134,14 +138,17 @@ rating_test_results <- predict(lm_fit, new_data = rating_test) %>%
 rating_test_results
 
 # RMSE on test set
-rmse(rating_test_results, 
+rmse_exp2 <- rmse(rating_test_results, 
      truth = ratings,
      estimate = .pred)
 
 # R2 on test set
-rsq(rating_test_results,
+rsquare_exp2 <- rsq(rating_test_results,
     truth = ratings,
     estimate = .pred)
+
+experiments_2 <- data.frame(experiment = "experiment 2", rmse = rmse_exp2[".estimate"], rsquare = rsquare_exp2[".estimate"])
+experiments_2 <- experiments_2 %>% rename(rmse = ".estimate", rsquare = ".estimate.1" )
 
 ggplot(data = rating_test_results,
        mapping = aes(x = .pred, y = ratings)) +
@@ -152,6 +159,7 @@ ggplot(data = rating_test_results,
        y = 'Actual Rating')
 
 ```
+
 ```{r}
 
 # Experiment 3: MODEL WITHOUT DUMMIES (from data prep as-is)
@@ -223,14 +231,17 @@ rating_test_results <- predict(lm_fit, new_data = rating_test) %>%
 rating_test_results
 
 # RMSE on test set
-rmse(rating_test_results, 
+rmse_exp3 <- rmse(rating_test_results, 
      truth = ratings,
      estimate = .pred)
 
 # R2 on test set
-rsq(rating_test_results,
+rsquare_exp3 <- rsq(rating_test_results,
     truth = ratings,
     estimate = .pred)
+
+experiments_3 <- data.frame(experiment = "experiment 3", rmse = rmse_exp3[".estimate"], rsquare = rsquare_exp3[".estimate"])
+experiments_3 <- experiments_3 %>% rename(rmse = ".estimate", rsquare = ".estimate.1" )
 
 ggplot(data = rating_test_results,
        mapping = aes(x = .pred, y = ratings)) +
@@ -242,6 +253,16 @@ ggplot(data = rating_test_results,
 
 
 ```
+
+```{r}
+
+# side by side comparison
+
+experiments <- rbind(experiments,experiments_2,experiments_3)
+
+experiments
+```
+
 
 ```{r}
 
@@ -312,7 +333,206 @@ ggplot(data=categ_test, aes(x = ratings)) + geom_bar() + geom_text(stat='count',
 # 5) reduce dimension for cost
 # 6) go back to data prep and visualize restaurant name distributions (which ones are the most famous? what about region/city?)
 # - see if we can get something out of there to reduce dimension/variability of the dataset? remove cuisines that are not successful and or receive less votes? 
-# 7) create 
 
+```
+
+
+```{r}
+# Experiment 4: MODEL WITHOUT DUMMIES (from data prep as-is) AND WITH TRANSFORMATIONS
+
+# Using: modelling_df
+set.seed(123)
+
+# This is the prepared dataset without binary columns
+
+modelling_df <- read.csv("data/modelling_df.csv")
+
+
+split_dt <- subset (modelling_df, select = -name)
+split_dt <- subset (split_dt, select = -cuisine)
+
+# Create split object
+rating_split <- initial_split(split_dt, prop = 0.70, 
+                                   strata = ratings)
+
+# Split training data set
+rating_training <- rating_split %>% 
+                        training()
+
+# Split testing data set
+rating_test <- rating_split %>% 
+                    testing()
+
+rating_training$two_meal_cost <- gsub(",", "", rating_training$two_meal_cost)
+rating_training <- rating_training %>% filter(ratings <= 5)
+
+rating_training <- rating_training %>% 
+  mutate( two_meal_cost = as.numeric(two_meal_cost))
+
+rating_test$two_meal_cost <- gsub(",", "", rating_test$two_meal_cost)
+
+rating_test <- rating_test %>% 
+  mutate( two_meal_cost = as.numeric(two_meal_cost))
+rating_test <- rating_test %>% filter(ratings <= 5)
+
+
+### START MODELLING
+# Predictors should have the same scale. One way to achieve this is to center and scale each so that each predictor has mean zero and a variance of one. By default, glmnet::glmnet() uses the argument standardize = TRUE to center and scale the data.
+
+lm_model <- linear_reg(penalty = double(1)) %>% 
+  set_engine('glmnet') %>%
+  set_mode('regression')
+
+# View object properties
+lm_model
+
+lm_fit <- lm_model %>% 
+  fit(ratings ~ ., data = rating_training)
+
+# View lm_fit properties
+lm_fit
+summary(lm_fit$fit)
+
+# Estimated coefficients
+tidy(lm_fit)
+
+# Performance metrics on training data
+glance(lm_fit)
+
+# variable importance
+vip(lm_fit, num_features = 20L)
+
+# test accuracy
+rating_test_results <- predict(lm_fit, new_data = rating_test) %>% 
+  bind_cols(rating_test)
+
+# View results
+rating_test_results
+
+# RMSE on test set
+rmse_exp4 <- rmse(rating_test_results, 
+     truth = ratings,
+     estimate = .pred)
+
+# R2 on test set
+rsquare_exp4 <- rsq(rating_test_results,
+    truth = ratings,
+    estimate = .pred)
+
+experiments_4 <- data.frame(experiment = "experiment 4", rmse = rmse_exp4[".estimate"], rsquare = rsquare_exp4[".estimate"])
+experiments_4 <- experiments_4 %>% rename(rmse = ".estimate", rsquare = ".estimate.1" )
+experiments <- rbind(experiments, experiments_4)
+
+ggplot(data = rating_test_results,
+       mapping = aes(x = .pred, y = ratings)) +
+  geom_point(color = '#006EA1') +
+  geom_abline(intercept = 0, slope = 1, color = 'orange') +
+  labs(title = 'Linear Regression Results - Ratings Test Set',
+       x = 'Predicted Rating',
+       y = 'Actual Rating')
+```
+
+
+```{r}
+# Experiment 5: XGBOOST MODEL WITHOUT DUMMIES (from data prep as-is) AND WITH TRANSFORMATION
+
+library(xgboost)
+
+# Using: modelling_df
+set.seed(123)
+
+# This is the prepared dataset without binary columns
+
+modelling_df <- read.csv("data/modelling_df.csv")
+
+
+split_dt <- subset (modelling_df, select = -name)
+split_dt <- subset (split_dt, select = -cuisine)
+
+# Create split object
+rating_split <- initial_split(split_dt, prop = 0.70, 
+                                   strata = ratings)
+
+# Split training data set
+rating_training <- rating_split %>% 
+                        training()
+
+# Split testing data set
+rating_test <- rating_split %>% 
+                    testing()
+
+rating_training$two_meal_cost <- gsub(",", "", rating_training$two_meal_cost)
+rating_training <- rating_training %>% filter(ratings <= 5)
+
+rating_training <- rating_training %>% 
+  mutate( two_meal_cost = as.numeric(two_meal_cost))
+
+rating_test$two_meal_cost <- gsub(",", "", rating_test$two_meal_cost)
+
+rating_test <- rating_test %>% 
+  mutate( two_meal_cost = as.numeric(two_meal_cost))
+rating_test <- rating_test %>% filter(ratings <= 5)
+
+
+# START MODELING
+
+xgboost_recipe <- 
+  recipe(ratings ~ ., data = rating_training) %>% 
+  # step_novel(all_nominal(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>% 
+  step_zv(all_predictors()) 
+
+xgboost_spec <- 
+  boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), 
+    loss_reduction = tune(), sample_size = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+set.seed(123)
+folds = vfold_cv(rating_training, v = 5)
+
+set.seed(77680)
+xgboost_tune <-
+  tune_grid(xgboost_workflow, resamples = folds, grid = 2)
+
+best_xgb = select_best(xgboost_tune, "rsq")
+
+final_xgb = finalize_workflow(
+  xgboost_workflow,
+  best_xgb
+)
+
+final_xgb
+
+#fit the finalized workflow to our training data
+final_xgb_fit = fit(final_xgb, rating_training)
+
+rating_test_results = predict(final_xgb_fit, rating_test) %>% bind_cols(rating_test)
+
+# View results
+rating_test_results
+
+# RMSE on test set
+rmse_exp5 <- rmse(rating_test_results, 
+     truth = ratings,
+     estimate = .pred)
+
+# R2 on test set
+rsquare_exp5 <- rsq(rating_test_results,
+    truth = ratings,
+    estimate = .pred)
+
+experiments_5 <- data.frame(experiment = "experiment 5", rmse = rmse_exp5[".estimate"], rsquare = rsquare_exp5[".estimate"])
+experiments_5 <- experiments_5 %>% rename(rmse = ".estimate", rsquare = ".estimate.1" )
+experiments <- rbind(experiments, experiments_5)
+
+experiments
+
+head(trainpredxgb)
 ```
 
